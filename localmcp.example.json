@@ -1,0 +1,16 @@
+{
+  "workspaces": {
+    "home": "~"
+  },
+  "defaultWorkspace": "home",
+  "features": {
+    "files": true,
+    "shell": true,
+    "processes": true
+  },
+  "skills": {
+    "dir": "skills",
+    "enabled": ["local-development"]
+  },
+  "mcpServers": {}
+}
