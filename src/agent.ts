@@ -32,8 +32,11 @@ try{settings=JSON.parse(await readFile(workerFile,'utf8'));}
 catch(error:any){
   if(error.code!=='ENOENT')throw error;
   const workerUrl=process.env.LOCALMCP_WORKER_URL||DEFAULT_PUBLIC_WORKER_URL;
-  const response=await fetch(new URL('/register',workerUrl),{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:AbortSignal.timeout(15000)});
-  if(!response.ok)throw new Error(`Public Worker registration failed (${response.status}). Set LOCALMCP_WORKER_URL to a self-hosted Worker if needed.`);
+  const registrationHeaders:Record<string,string>={'Content-Type':'application/json'};
+  const registrationToken=process.env.LOCALMCP_REGISTRATION_TOKEN;
+  if(registrationToken)registrationHeaders.Authorization=`Bearer ${registrationToken}`;
+  const response=await fetch(new URL('/register',workerUrl),{method:'POST',headers:registrationHeaders,body:'{}',signal:AbortSignal.timeout(15000)});
+  if(!response.ok)throw new Error(`Worker registration failed (${response.status}). Set LOCALMCP_WORKER_URL and LOCALMCP_REGISTRATION_TOKEN for a protected self-hosted Worker.`);
   const registered=await response.json() as Settings;
   settings={workerUrl:registered.workerUrl,agentToken:registered.agentToken,mcpToken:registered.mcpToken,deviceId:registered.deviceId};
   await writeFile(workerFile,JSON.stringify(settings,null,2),{mode:0o600});
