@@ -37,7 +37,8 @@
     "worker:dev": "wrangler dev --config wrangler.jsonc",
     "deploy": "npm run worker:deploy",
     "worker:deploy": "wrangler deploy --config wrangler.jsonc",
-    "worker:secrets": "wrangler secret bulk ~/.localmcp/worker-secrets.json --config wrangler.jsonc"
+    "worker:secrets": "wrangler secret bulk ~/.localmcp/worker-secrets.json --config wrangler.jsonc",
+    "worker:rotate": "node scripts/rotate-mcp-token.mjs"
   },
   "repository": {
     "type": "git",
