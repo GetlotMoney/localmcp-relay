@@ -46,7 +46,8 @@ test('Worker + Durable Object + local agent: authenticated MCP, rotation, chunki
   await writeFile(join(root,'.localmcp/worker.json'),JSON.stringify(workerSettings));
   async function cli(command?: string) {
     return new Promise<string>((done, reject) => {
-      const child=spawn(process.execPath,[resolve('dist/index.js'),...(command?[command]:[])],{cwd:root,env:{...process.env,HOME:root,LOCALMCP_ROOT:root,LOCALMCP_AGENT_PORT:String(port+1),LOCALMCP_SHELL:'0'},stdio:['ignore','pipe','pipe']});
+      const env={...process.env,HOME:root,USERPROFILE:root,LOCALMCP_ROOT:root,LOCALMCP_AGENT_PORT:String(port+1),LOCALMCP_SHELL:'0'};
+      const child=spawn(process.execPath,[resolve('dist/index.js'),...(command?[command]:[])],{cwd:root,env,stdio:['ignore','pipe','pipe']});
       let output='';child.stdout.on('data',c=>{output+=c;});child.stderr.on('data',c=>{output+=c;});
       const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('CLI did not return: '+output));},25000);
       child.on('error',reject);
