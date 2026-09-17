@@ -18,28 +18,32 @@ test('relay framing preserves large Unicode/image payloads and rejects invalid s
   assert.throws(()=>parseFrame('{"id":"x","index":0,"total":99999,"data":""}'));
   assert.throws(()=>new Assembly().push({id:'x',index:1,total:2,data:''}));
 });
-test('Worker + Durable Object + local agent: authenticated MCP, chunking and reconnect', {timeout:90000}, async t=>{
+test('Worker + Durable Object + local agent: authenticated MCP, rotation, chunking and reconnect', {timeout:90000}, async t=>{
   const root=await mkdtemp(join(tmpdir(),'localmcp-relay-'));
   const children:ChildProcess[]=[];
   t.after(async()=>{await cli('stop').catch(()=>{});for(const c of children)c.kill('SIGTERM');await new Promise(r=>setTimeout(r,2000));for(const c of children)if(c.exitCode===null)c.kill('SIGKILL');await rm(root,{recursive:true,force:true});});
   const port=20000+Math.floor(Math.random()*15000),origin=`http://127.0.0.1:${port}`;
-  const agentToken='b'.repeat(64),mcpToken='c'.repeat(64),hash=(s:string)=>createHash('sha256').update(s).digest('hex');
-  const worker=spawn(process.execPath,[resolve('node_modules/wrangler/bin/wrangler.js'),'dev','--config',resolve('wrangler.jsonc'),'--local','--port',String(port),'--inspector-port','0','--persist-to',join(root,'state'),'--var',`AGENT_TOKEN_HASH:${hash(agentToken)}`,'--var',`MCP_TOKEN_HASH:${hash(mcpToken)}`],{stdio:['ignore','pipe','pipe']});children.push(worker);
+  const agentToken='b'.repeat(64),mcpToken='c'.repeat(64),registrationToken='d'.repeat(64),hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+  const worker=spawn(process.execPath,[resolve('node_modules/wrangler/bin/wrangler.js'),'dev','--config',resolve('wrangler.jsonc'),'--local','--port',String(port),'--inspector-port','0','--persist-to',join(root,'state'),'--var',`AGENT_TOKEN_HASH:${hash(agentToken)}`,'--var',`MCP_TOKEN_HASH:${hash(mcpToken)}`,'--var',`REGISTRATION_TOKEN_HASH:${hash(registrationToken)}`],{stdio:['ignore','pipe','pipe']});children.push(worker);
   let logs='';worker.stdout?.on('data',c=>{logs+=c;});worker.stderr?.on('data',c=>{logs+=c;});
   let ready=false;
   for(let i=0;i<200;i++){try{if((await fetch(origin+'/healthz')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,100));}
   assert.ok(ready,logs);
+  const health:any=await (await fetch(origin+'/healthz')).json();assert.equal(health.registration,'protected');
   const legacyUrl=`${origin}/mcp/${mcpToken}`;
   assert.equal((await fetch(legacyUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,503);
   assert.equal((await fetch(origin+'/mcp/bad',{method:'POST'})).status,404);
   assert.equal((await fetch(legacyUrl,{headers:{Origin:'https://evil.example'}})).status,403);
   assert.equal((await fetch(origin+'/agent',{headers:{Authorization:`Bearer ${mcpToken}`}})).status,404);
-  const registration=await fetch(origin+'/register',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(registration.status,201);
+  assert.equal((await fetch(origin+'/register',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,404);
+  assert.equal((await fetch(origin+'/register',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer wrong'},body:'{}'})).status,404);
+  const registration=await fetch(origin+'/register',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${registrationToken}`},body:'{}'});assert.equal(registration.status,201);
   const registered:any=await registration.json();assert.match(registered.deviceId,/^[0-9a-f-]{36}$/);assert.equal(registered.agentToken.length,64);assert.equal(registered.mcpToken.length,64);
   const url=registered.mcpUrl;const post=()=>fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal((await post()).status,503);
   assert.equal((await fetch(`${origin}/mcp/${registered.deviceId}/${mcpToken}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,404);
   await mkdir(join(root,'.localmcp'));
-  await writeFile(join(root,'.localmcp/worker.json'),JSON.stringify({workerUrl:origin,agentToken:registered.agentToken,mcpToken:registered.mcpToken,deviceId:registered.deviceId}));
+  const workerSettings={workerUrl:origin,agentToken:registered.agentToken,mcpToken:registered.mcpToken,deviceId:registered.deviceId};
+  await writeFile(join(root,'.localmcp/worker.json'),JSON.stringify(workerSettings));
   async function cli(command?: string) {
     return new Promise<string>((done, reject) => {
       const child=spawn(process.execPath,[resolve('dist/index.js'),...(command?[command]:[])],{cwd:root,env:{...process.env,HOME:root,LOCALMCP_ROOT:root,LOCALMCP_AGENT_PORT:String(port+1),LOCALMCP_SHELL:'0'},stdio:['ignore','pipe','pipe']});
@@ -111,6 +115,22 @@ test('Worker + Durable Object + local agent: authenticated MCP, chunking and rec
   assert.match(await cli(),/Status: running/);
   const second=new Client({name:'reconnect-test',version:'1'});await second.connect(new StreamableHTTPClientTransport(new URL(url)));
   assert.equal((await second.listTools()).tools.length,20);await second.close();
+
+  // Rotate only the MCP token. The currently connected agent must remain usable.
+  assert.equal((await fetch(`${origin}/rotate/${registered.deviceId}`,{method:'POST',headers:{Authorization:'Bearer wrong'}})).status,404);
+  const rotation=await fetch(`${origin}/rotate/${registered.deviceId}`,{method:'POST',headers:{Authorization:`Bearer ${registered.mcpToken}`}});assert.equal(rotation.status,200);
+  const rotated:any=await rotation.json();assert.equal(rotated.deviceId,registered.deviceId);assert.equal(rotated.mcpToken.length,64);assert.notEqual(rotated.mcpToken,registered.mcpToken);
+  const rpc=JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}});
+  assert.equal((await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:rpc})).status,404,'old MCP URL must be invalid immediately');
+  const rotatedClient=new Client({name:'rotated-client',version:'1'});await rotatedClient.connect(new StreamableHTTPClientTransport(new URL(rotated.mcpUrl)));
+  assert.equal((await rotatedClient.listTools()).tools.length,20);await rotatedClient.close();
+  workerSettings.mcpToken=rotated.mcpToken;
+  await writeFile(join(root,'.localmcp/worker.json'),JSON.stringify(workerSettings));
+  await cli('stop');
+  assert.match(await cli(),/Status: running/);
+  const third=new Client({name:'rotated-reconnect-test',version:'1'});await third.connect(new StreamableHTTPClientTransport(new URL(rotated.mcpUrl)));
+  assert.equal((await third.listTools()).tools.length,20);await third.close();
+
   await cli('stop');
   await writeFile(join(root,'.localmcp/worker.json'),'{invalid');
   await assert.rejects(cli(), /startup failed/);
