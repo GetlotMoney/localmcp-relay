@@ -1,5 +1,5 @@
 import { Assembly, frames, parseFrame } from '../src/relay-protocol';
-interface Env { RELAY: DurableObjectNamespace; MCP_TOKEN_HASH?: string; AGENT_TOKEN_HASH?: string }
+interface Env { RELAY: DurableObjectNamespace; MCP_TOKEN_HASH?: string; AGENT_TOKEN_HASH?: string; REGISTRATION_TOKEN_HASH?: string }
 const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 const sha256=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 async function authorized(token:string,expected?:string){if(!expected||!/^[a-f0-9]{64}$/.test(expected)||token.length>256)return false;const hash=await sha256(token);let diff=0;for(let i=0;i<64;i++)diff|=hash.charCodeAt(i)^expected.charCodeAt(i);return diff===0;}
@@ -7,8 +7,9 @@ function randomHex(bytes=32){const data=new Uint8Array(bytes);crypto.getRandomVa
 async function bodyText(request:Request,limit:number){const reader=request.body?.getReader();if(!reader)return'';const chunks:Uint8Array[]=[];let size=0;try{while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>limit){await reader.cancel();throw new Error('Request too large');}chunks.push(value);}}finally{reader.releaseLock();}const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return new TextDecoder().decode(bytes);}
 function relay(env:Env,deviceId:string){return env.RELAY.get(env.RELAY.idFromName(deviceId));}
 export default {async fetch(request:Request,env:Env):Promise<Response>{
- const url=new URL(request.url);if(url.pathname==='/healthz'&&request.method==='GET')return json({ok:true,service:'localmcp-relay',registration:true});if(request.headers.has('Origin'))return json({error:'Origin not allowed'},403);
+ const url=new URL(request.url);if(url.pathname==='/healthz'&&request.method==='GET')return json({ok:true,service:'localmcp-relay',registration:env.REGISTRATION_TOKEN_HASH?'protected':'open'});if(request.headers.has('Origin'))return json({error:'Origin not allowed'},403);
  if(url.pathname==='/register'&&request.method==='POST'){
+  if(env.REGISTRATION_TOKEN_HASH){const token=request.headers.get('Authorization')?.replace(/^Bearer /,'')||'';if(!await authorized(token,env.REGISTRATION_TOKEN_HASH))return new Response(null,{status:404});}
   const deviceId=crypto.randomUUID(),agentToken=randomHex(),mcpToken=randomHex();
   const r=await relay(env,deviceId).fetch(new Request('https://relay.internal/register',{method:'POST',headers:{'x-agent-hash':await sha256(agentToken),'x-mcp-hash':await sha256(mcpToken)}}));
   if(!r.ok)return json({error:'Registration failed'},500);
@@ -16,6 +17,14 @@ export default {async fetch(request:Request,env:Env):Promise<Response>{
  }
  const agentMatch=/^\/agent\/([0-9a-f-]{36})$/.exec(url.pathname);
  if(agentMatch){if(request.headers.get('Upgrade')?.toLowerCase()!=='websocket')return json({error:'WebSocket required'},426);const token=request.headers.get('Authorization')?.replace(/^Bearer /,'')||'';return relay(env,agentMatch[1]).fetch(new Request('https://relay.internal/agent',{headers:{Upgrade:'websocket','x-localmcp-agent-token':token}}));}
+ const rotateMatch=/^\/rotate\/([0-9a-f-]{36})$/.exec(url.pathname);
+ if(rotateMatch){
+  if(request.method!=='POST')return new Response(null,{status:405,headers:{Allow:'POST'}});
+  const current=request.headers.get('Authorization')?.replace(/^Bearer /,'')||'',mcpToken=randomHex();
+  const r=await relay(env,rotateMatch[1]).fetch(new Request('https://relay.internal/rotate-mcp',{method:'POST',headers:{'x-localmcp-mcp-token':current,'x-new-mcp-hash':await sha256(mcpToken)}}));
+  if(!r.ok)return new Response(null,{status:r.status===404?404:500});
+  return json({deviceId:rotateMatch[1],mcpToken,workerUrl:url.origin,mcpUrl:`${url.origin}/mcp/${rotateMatch[1]}/${mcpToken}`});
+ }
  const mcpMatch=/^\/mcp\/([0-9a-f-]{36})\/([a-f0-9]{64})$/.exec(url.pathname);
  if(mcpMatch){if(request.method!=='POST')return new Response(null,{status:405,headers:{Allow:'POST'}});if(!request.headers.get('Content-Type')?.toLowerCase().includes('application/json'))return json({error:'JSON required'},415);let body:string;try{body=await bodyText(request,2*1024*1024);JSON.parse(body);}catch{return json({error:'Invalid JSON or body exceeds 2 MiB'},400);}const headers=new Headers({'Content-Type':'application/json','Accept':'application/json, text/event-stream','x-localmcp-mcp-token':mcpMatch[2]});const version=request.headers.get('MCP-Protocol-Version');if(version)headers.set('MCP-Protocol-Version',version);return relay(env,mcpMatch[1]).fetch(new Request('https://relay.internal/mcp',{method:'POST',headers,body}));}
  // Legacy single-user self-hosted routes.
@@ -28,6 +37,11 @@ export class McpRelay{
  private pending=new Map<string,Pending>();constructor(private ctx:DurableObjectState){ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping','pong'));}
  async fetch(request:Request):Promise<Response>{const url=new URL(request.url);
   if(url.pathname==='/register'){const agentHash=request.headers.get('x-agent-hash'),mcpHash=request.headers.get('x-mcp-hash');if(!agentHash||!mcpHash)return json({error:'Invalid registration'},400);await this.ctx.storage.put({agentHash,mcpHash});return json({ok:true});}
+  if(url.pathname==='/rotate-mcp'){
+   const expected=await this.ctx.storage.get<string>('mcpHash');if(!await authorized(request.headers.get('x-localmcp-mcp-token')||'',expected))return new Response(null,{status:404});
+   const next=request.headers.get('x-new-mcp-hash');if(!next||!/^[a-f0-9]{64}$/.test(next))return json({error:'Invalid next token hash'},400);
+   await this.ctx.storage.put('mcpHash',next);return json({ok:true});
+  }
   const legacy=request.headers.get('x-localmcp-legacy')==='1';
   if(url.pathname==='/agent'){if(!legacy){const expected=await this.ctx.storage.get<string>('agentHash');if(!await authorized(request.headers.get('x-localmcp-agent-token')||'',expected))return new Response(null,{status:404});}if(this.ctx.getWebSockets('agent').length)return json({error:'An agent is already connected'},409);const pair=new WebSocketPair();this.ctx.acceptWebSocket(pair[1],['agent']);return new Response(null,{status:101,webSocket:pair[0]});}
   if(!legacy){const expected=await this.ctx.storage.get<string>('mcpHash');if(!await authorized(request.headers.get('x-localmcp-mcp-token')||'',expected))return new Response(null,{status:404});}
