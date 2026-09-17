@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { randomBytes } from 'node:crypto';
 
 const stateDir=resolve(homedir(),'.localmcp');
 const workerFile=resolve(stateDir,'worker.json');
@@ -18,9 +17,7 @@ if(!response.ok)throw new Error(`MCP token rotation failed (${response.status}).
 const rotated=await response.json();
 if(typeof rotated.mcpToken!=='string'||!/^[a-f0-9]{64}$/.test(rotated.mcpToken)||typeof rotated.mcpUrl!=='string')throw new Error('Worker returned an invalid rotation response');
 const updated={...settings,mcpToken:rotated.mcpToken};
-const temp=resolve(stateDir,`.worker.json.rotate-${randomBytes(8).toString('hex')}`);
-await writeFile(temp,JSON.stringify(updated,null,2),{mode:0o600});
-await rename(temp,workerFile);
+await writeFile(workerFile,JSON.stringify(updated,null,2),{mode:0o600});
 console.log('MCP token rotated successfully. The old MCP URL is now invalid.');
 console.log('New MCP URL:');
 console.log(rotated.mcpUrl);
